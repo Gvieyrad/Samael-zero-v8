@@ -1,0 +1,15 @@
+.env
+__pycache__/
+*.pyc
+*.pyo
+*.log
+data/*.db
+data/*.db-wal
+data/*.db-shm
+logs/
+backups/
+*.bak*
+optimizer.log
+nohup.out
+*.PNG
+*.png
