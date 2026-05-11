@@ -37,24 +37,25 @@ PAIRS = {
     'WLFIUSDT':   {'exit_min': 15, 'pre_trend_pct': 3.0, 'vol_mult': 10},
     'XRPUSDT':    {'exit_min': 15, 'pre_trend_pct': 3.0, 'vol_mult': 10},
     'BNBUSDT':    {'exit_min': 15, 'pre_trend_pct': 3.0, 'vol_mult': 10},
-    'DOGSUSDT':   {'exit_min': 15, 'pre_trend_pct': 3.0, 'vol_mult': 10},
+    'DOGSUSDT':   {'exit_min': 15, 'pre_trend_pct': 3.0, 'vol_mult': 30},
     'TSTUSDT':    {'exit_min': 15, 'pre_trend_pct': 3.0, 'vol_mult': 10},
     'PENGUUSDT':  {'exit_min': 15, 'pre_trend_pct': 3.0, 'vol_mult': 10},
     'CHIPUSDT':   {'exit_min': 15, 'pre_trend_pct': 3.0, 'vol_mult': 10},
     'ADAUSDT':    {'exit_min': 15, 'pre_trend_pct': 3.0, 'vol_mult': 10},
     'TONUSDT':    {'exit_min': 15, 'pre_trend_pct': 3.0, 'vol_mult': 10},
     'SUIUSDT':    {'exit_min': 15, 'pre_trend_pct': 3.0, 'vol_mult': 10},
-    'AVAXUSDT':   {'exit_min': 15, 'pre_trend_pct': 3.0, 'vol_mult': 10},
     'NOTUSDT':    {'exit_min': 15, 'pre_trend_pct': 3.0, 'vol_mult': 10},
     'LTCUSDT':    {'exit_min': 15, 'pre_trend_pct': 3.0, 'vol_mult': 10},
-    'BTCUSDT':    {'exit_min': 15, 'pre_trend_pct': 3.0, 'vol_mult': 10},
+    'SOLUSDT':    {'exit_min': 15, 'pre_trend_pct': 3.0, 'vol_mult': 10},
+    'OPUSDT':     {'exit_min': 15, 'pre_trend_pct': 3.0, 'vol_mult': 10},
 }
 SL_PCT = 0.2                # live-validated: 0.1% liquidado por spread, 0.2% ok
 TP_PCT = 1.2                # live-validated: 43-48% WR con esto vs 9% WR con 2.0%
 VOL_WINDOW = 100            # Rolling median window (candles)
 CHECK_SECONDS = 15          # Check every 15s (need to catch 1m spikes)
 COOLDOWN_MINUTES = 20       # optimizado: 20min > 30min (APR +3.5%, MaxDD -0.2%)       # Min time between trades on same pair
-SKIP_HOURS = {1, 2, 6, 7, 10, 12, 21, 23}  # Optimizado 90d backtest: bloquea horas perdedoras, libera 09h UTC
+SKIP_HOURS = {1, 2, 6, 7, 10, 12, 18, 20, 21, 23}  # Optimizado 90d backtest: bloquea horas perdedoras, libera 09h UTC
+DAILY_LOSS_LIMIT = 0.03     # Circuit breaker: halt entries if daily loss > 3% capital
 LONG_TREND_MIN  = 4.0           # LONG: necesita caida >= 4% (dumps pequeños continúan)
 LONG_TREND_MAX  = 6.0           # LONG: cap en 6%
 SHORT_TREND_MIN = 3.0           # SHORT: cualquier pump >= 3% revierte rápido
@@ -187,7 +188,14 @@ def detect_signal(klines, config):
 # ── Position Management ───────────────────────────────────────────────────────
 def open_position(db, symbol, side, price, vol_ratio, pre_trend, config):
     bal = get_balance(db)
-    risk = LONG_RISK if side == "LONG" else SHORT_RISK
+    # Dynamic sizing: spikes >= 30x → +50% size, >= 20x → +25% size (backtest v9: +7.56/7y)
+    base_risk = LONG_RISK if side == "LONG" else SHORT_RISK
+    if vol_ratio >= 30:
+        risk = min(base_risk * 1.5, 0.60)
+    elif vol_ratio >= 20:
+        risk = min(base_risk * 1.25, 0.50)
+    else:
+        risk = base_risk
     size_usd = bal * risk
     qty = size_usd / price
 
@@ -245,8 +253,9 @@ def close_position(db, pos, exit_price, reason):
 
 
 def check_exits(db, positions):
-    """Check SL, TP, and time exits for all positions."""
+    """Check SL, TP, and time exits for all positions. Returns total PnL closed."""
     now = datetime.now(timezone.utc)
+    total_pnl = 0.0
     for pos in positions:
         try:
             price = get_current_price(pos['symbol'])
@@ -255,27 +264,28 @@ def check_exits(db, positions):
 
             # Stop loss
             if pos['side'] == 'LONG' and price <= pos['stop_loss']:
-                close_position(db, pos, price, 'stop_loss')
+                total_pnl += close_position(db, pos, price, 'stop_loss')
                 continue
             elif pos['side'] == 'SHORT' and price >= pos['stop_loss']:
-                close_position(db, pos, price, 'stop_loss')
+                total_pnl += close_position(db, pos, price, 'stop_loss')
                 continue
 
             # Take profit
             if pos['side'] == 'LONG' and price >= pos['take_profit']:
-                close_position(db, pos, price, 'take_profit')
+                total_pnl += close_position(db, pos, price, 'take_profit')
                 continue
             elif pos['side'] == 'SHORT' and price <= pos['take_profit']:
-                close_position(db, pos, price, 'take_profit')
+                total_pnl += close_position(db, pos, price, 'take_profit')
                 continue
 
             # Time exit
             if age_min >= pos['max_hold_min']:
-                close_position(db, pos, price, 'time_exit(%.0fm)' % age_min)
+                total_pnl += close_position(db, pos, price, 'time_exit(%.0fm)' % age_min)
                 continue
 
         except Exception as e:
             log.error('Exit check error %s: %s', pos['symbol'], e)
+    return total_pnl
 
 
 # ── Report ────────────────────────────────────────────────────────────────────
@@ -292,11 +302,17 @@ def report(db):
     total_pnl = sum(pnls)
     bal = get_balance(db)
 
-    # Sharpe
+    # Sharpe annualizado por frecuencia real (trades/dia * 252)
     if n > 1:
         mean_r = sum(pnls) / n
         std_r = math.sqrt(sum((p - mean_r) ** 2 for p in pnls) / (n - 1))
-        sharpe = (mean_r / std_r) * math.sqrt(n) if std_r > 0 else 0  # annualize by sample size
+        times = db.execute('SELECT entry_time FROM trades ORDER BY entry_time').fetchall()
+        if len(times) >= 2:
+            span_days = max((datetime.fromisoformat(times[-1][0]) - datetime.fromisoformat(times[0][0])).total_seconds() / 86400, 1)
+            freq = len(times) / span_days
+        else:
+            freq = 2.5
+        sharpe = (mean_r / std_r) * math.sqrt(freq * 252) if std_r > 0 else 0
     else:
         sharpe = 0
 
@@ -332,6 +348,26 @@ def main():
     db = init_db()
     bal = get_balance(db)
     last_trade_time = {}  # symbol -> datetime (cooldown)
+    # Load today PnL from DB so circuit breaker survives restarts
+    _today_prefix = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+    _row = db.execute(
+        "SELECT COALESCE(SUM(pnl),0) FROM trades WHERE exit_time LIKE ?",
+        (_today_prefix + '%',)).fetchone()
+    daily_pnl = _row[0]
+    circuit_day = datetime.now(timezone.utc).date()
+
+    import signal as _signal
+    def _shutdown(sig, frame):
+        log.info('Shutdown signal %d received', sig)
+        report(db)
+        try:
+            from alerts.telegram import notify_bot_event
+            notify_bot_event('Samael Zero v4 PARADO', 'Bal=$%.2f | PnL hoy=$%.2f' % (get_balance(db), daily_pnl))
+        except Exception:
+            pass
+        sys.exit(0)
+    _signal.signal(_signal.SIGTERM, _shutdown)
+    _signal.signal(_signal.SIGINT, _shutdown)
 
     log.info('Samael Zero v4 — Mean Reversion on Volume Spikes')
     log.info('Capital: $%.2f | L-Risk: %.0f%% S-Risk: %.0f%% | SL: %.1f%% | TP: %.1f%%',
@@ -361,13 +397,20 @@ def main():
             cycle += 1
             now = datetime.now(timezone.utc)
 
+            # Reset circuit breaker at UTC midnight (before accumulating)
+            today = now.date()
+            if circuit_day != today:
+                circuit_day = today
+                daily_pnl = 0.0
+
             # ── Check exits ──
             positions = get_open_positions(db)
-            check_exits(db, positions)
+            daily_pnl += check_exits(db, positions)
 
             # ── Look for new entries ──
             positions = get_open_positions(db)
             open_symbols = {p['symbol'] for p in positions}
+            bal = get_balance(db)
 
             # BTC regime & SHORT filter pre-compute
             btc_1h_up = False
@@ -394,9 +437,14 @@ def main():
             except Exception:
                 pass
 
-            if len(positions) < MAX_POSITIONS:
+            if daily_pnl < -(bal * DAILY_LOSS_LIMIT):
+                if cycle % 20 == 1:
+                    log.warning('CIRCUIT BREAKER -- daily PnL $%.2f (%.1f%%) -- entries paused',
+                                daily_pnl, abs(daily_pnl / bal * 100))
+            elif len(positions) < MAX_POSITIONS:
+                open_count = len(positions)
                 for symbol, config in PAIRS.items():
-                    if len(get_open_positions(db)) >= MAX_POSITIONS:
+                    if open_count >= MAX_POSITIONS:
                         break
                     if symbol in open_symbols:
                         continue
@@ -450,6 +498,8 @@ def main():
 
                         open_position(db, symbol, side, price, vol_ratio, pre_trend, config)
                         last_trade_time[symbol] = now
+                        open_count += 1
+                        open_symbols.add(symbol)
 
                     except Exception as e:
                         log.error('Entry error %s: %s', symbol, e)
