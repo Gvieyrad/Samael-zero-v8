@@ -29,24 +29,14 @@ LONG_RISK = 0.35           # 35% per LONG trade (~$175)
 SHORT_RISK = 0.15          # 15% per SHORT trade (~$75)
 MAX_POSITIONS = 7
 PAIRS = {
-    # v5 config (2026-05-05): vol_mult=10 (solo spikes extremos, 48%WR), pre_trend=3.0%
-    # Removidos: ZECUSDT/DASHUSDT/LUNCUSDT/ETHUSDT (0-20%WR en live), FILUSDT, CHZUSDT
-    'DOGEUSDT':   {'exit_min': 15, 'pre_trend_pct': 3.0, 'vol_mult': 10},
-    'TRUMPUSDT':  {'exit_min': 15, 'pre_trend_pct': 3.0, 'vol_mult': 10},
+    # v5 config — 7 pares activos (90d backtest: WR>=40%, PnL>0)
+    # Removidos: DOGEUSDT/XRPUSDT/BNBUSDT/CHIPUSDT/ADAUSDT/SUIUSDT/LTCUSDT/SOLUSDT (0 trades), TRUMPUSDT(17%WR -$0.89), TONUSDT(14%WR -$1.98)
     'NEARUSDT':   {'exit_min': 15, 'pre_trend_pct': 3.0, 'vol_mult': 10},
     'WLFIUSDT':   {'exit_min': 15, 'pre_trend_pct': 3.0, 'vol_mult': 10},
-    'XRPUSDT':    {'exit_min': 15, 'pre_trend_pct': 3.0, 'vol_mult': 10},
-    'BNBUSDT':    {'exit_min': 15, 'pre_trend_pct': 3.0, 'vol_mult': 10},
     'DOGSUSDT':   {'exit_min': 15, 'pre_trend_pct': 3.0, 'vol_mult': 30},
     'TSTUSDT':    {'exit_min': 15, 'pre_trend_pct': 3.0, 'vol_mult': 10},
     'PENGUUSDT':  {'exit_min': 15, 'pre_trend_pct': 3.0, 'vol_mult': 10},
-    'CHIPUSDT':   {'exit_min': 15, 'pre_trend_pct': 3.0, 'vol_mult': 10},
-    'ADAUSDT':    {'exit_min': 15, 'pre_trend_pct': 3.0, 'vol_mult': 10},
-    'TONUSDT':    {'exit_min': 15, 'pre_trend_pct': 3.0, 'vol_mult': 10},
-    'SUIUSDT':    {'exit_min': 15, 'pre_trend_pct': 3.0, 'vol_mult': 10},
     'NOTUSDT':    {'exit_min': 15, 'pre_trend_pct': 3.0, 'vol_mult': 10},
-    'LTCUSDT':    {'exit_min': 15, 'pre_trend_pct': 3.0, 'vol_mult': 10},
-    'SOLUSDT':    {'exit_min': 15, 'pre_trend_pct': 3.0, 'vol_mult': 10},
     'OPUSDT':     {'exit_min': 15, 'pre_trend_pct': 3.0, 'vol_mult': 10},
 }
 SL_PCT = 0.2                # live-validated: 0.1% liquidado por spread, 0.2% ok
