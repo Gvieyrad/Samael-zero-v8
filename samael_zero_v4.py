@@ -31,25 +31,25 @@ MAX_POSITIONS = 7
 PAIRS = {
     # v5 config — 7 pares activos (90d backtest: WR>=40%, PnL>0)
     # Removidos: DOGEUSDT/XRPUSDT/BNBUSDT/CHIPUSDT/ADAUSDT/SUIUSDT/LTCUSDT/SOLUSDT (0 trades), TRUMPUSDT(17%WR -$0.89), TONUSDT(14%WR -$1.98)
-    'NEARUSDT':   {'exit_min': 15, 'pre_trend_pct': 3.0, 'vol_mult': 10},
-    'WLFIUSDT':   {'exit_min': 15, 'pre_trend_pct': 3.0, 'vol_mult': 10},
-    'DOGSUSDT':   {'exit_min': 15, 'pre_trend_pct': 3.0, 'vol_mult': 30},
-    'TSTUSDT':    {'exit_min': 15, 'pre_trend_pct': 3.0, 'vol_mult': 10},
-    'PENGUUSDT':  {'exit_min': 15, 'pre_trend_pct': 3.0, 'vol_mult': 10},
-    'NOTUSDT':    {'exit_min': 15, 'pre_trend_pct': 3.0, 'vol_mult': 10},
-    'OPUSDT':     {'exit_min': 15, 'pre_trend_pct': 3.0, 'vol_mult': 10},
+    'NEARUSDT':   {'exit_min': 45, 'pre_trend_pct': 3.0, 'vol_mult': 10},
+    'WLFIUSDT':   {'exit_min': 45, 'pre_trend_pct': 3.0, 'vol_mult': 10},
+    'DOGSUSDT':   {'exit_min': 45, 'pre_trend_pct': 3.0, 'vol_mult': 30},
+    'TSTUSDT':    {'exit_min': 45, 'pre_trend_pct': 3.0, 'vol_mult': 10},
+    'PENGUUSDT':  {'exit_min': 45, 'pre_trend_pct': 3.0, 'vol_mult': 10},
+    'NOTUSDT':    {'exit_min': 45, 'pre_trend_pct': 3.0, 'vol_mult': 10},
+    'OPUSDT':     {'exit_min': 45, 'pre_trend_pct': 3.0, 'vol_mult': 10},
 }
 SL_PCT = 0.2                # live-validated: 0.1% liquidado por spread, 0.2% ok
 TP_PCT = 1.2                # live-validated: 43-48% WR con esto vs 9% WR con 2.0%
 VOL_WINDOW = 100            # Rolling median window (candles)
 CHECK_SECONDS = 15          # Check every 15s (need to catch 1m spikes)
 COOLDOWN_MINUTES = 20       # optimizado: 20min > 30min (APR +3.5%, MaxDD -0.2%)       # Min time between trades on same pair
-SKIP_HOURS = {1, 2, 6, 7, 10, 12, 18, 20, 21, 23}  # Optimizado 90d backtest: bloquea horas perdedoras, libera 09h UTC
+SKIP_HOURS = {1, 2, 23}         # Backtest multiyear: solo madrugada bloqueada, resto rentable
 DAILY_LOSS_LIMIT = 0.03     # Circuit breaker: halt entries if daily loss > 3% capital
 LONG_TREND_MIN  = 4.0           # LONG: necesita caida >= 4% (dumps pequeños continúan)
-LONG_TREND_MAX  = 6.0           # LONG: cap en 6%
+LONG_TREND_MAX  = 7.0           # LONG: cap en 7% (backtest: +206 PnL vs 6%)
 SHORT_TREND_MIN = 3.0           # SHORT: cualquier pump >= 3% revierte rápido
-SHORT_TREND_MAX = 6.0           # SHORT: cap en 6%
+SHORT_TREND_MAX = 7.0           # SHORT: cap en 7% (backtest: +206 PnL vs 6%)
 
 DB_PATH = '/home/noc/samaelalpha/data/samael_zero_v4.db'
 LOG_PATH = '/home/noc/samaelalpha/logs/samael_zero_v4.log'
@@ -107,22 +107,31 @@ def get_open_positions(db):
 
 # ── Market Data ───────────────────────────────────────────────────────────────
 def fetch_recent_klines(symbol, limit=250):
-    """Fetch recent 1m klines from Binance."""
     url = 'https://api.binance.com/api/v3/klines'
-    r = requests.get(url, params={'symbol': symbol, 'interval': '1m', 'limit': limit}, timeout=10)
-    data = r.json()
-    return data
+    for attempt in range(3):
+        try:
+            r = requests.get(url, params={'symbol': symbol, 'interval': '1m', 'limit': limit}, timeout=10)
+            return r.json()
+        except Exception as e:
+            if attempt == 2:
+                raise
+            time.sleep(2 ** attempt)
 
 
 def get_current_price(symbol):
-    """Get current price from Binance."""
-    r = requests.get('https://api.binance.com/api/v3/ticker/price',
-                     params={'symbol': symbol}, timeout=5)
-    return float(r.json()['price'])
+    for attempt in range(3):
+        try:
+            r = requests.get('https://api.binance.com/api/v3/ticker/price',
+                             params={'symbol': symbol}, timeout=5)
+            return float(r.json()['price'])
+        except Exception as e:
+            if attempt == 2:
+                raise
+            time.sleep(2 ** attempt)
 
 
 # ── Signal Detection ──────────────────────────────────────────────────────────
-def detect_signal(klines, config):
+def detect_signal(klines, config, symbol='?'):
     """Detect volume spike + pre-trend for mean reversion signal.
 
     Returns ('LONG', vol_ratio, pre_trend) or ('SHORT', vol_ratio, pre_trend) or None.
@@ -157,6 +166,7 @@ def detect_signal(klines, config):
     # Hour filter: skip NY open hours (mean-reversion fails in directional sessions)
     candle_hour = datetime.fromtimestamp(closed[-1][0] / 1000, tz=timezone.utc).hour
     if candle_hour in SKIP_HOURS:
+        log.info('NEAR-MISS %s vol=%.1fx h=%d — SKIP_HOUR bloqueó', symbol, vol_ratio, candle_hour)
         return None
 
     # Pre-trend: 1h change (60 candles back) using closed candles
@@ -172,6 +182,8 @@ def detect_signal(klines, config):
     elif pre_trend > SHORT_TREND_MIN and abs(pre_trend) <= SHORT_TREND_MAX:
         return 'SHORT', vol_ratio, pre_trend
 
+    log.info('NEAR-MISS %s vol=%.1fx trend=%.2f%% — trend fuera de rango (L:%.1f-%.1f%% S:%.1f-%.1f%%)',
+             symbol, vol_ratio, pre_trend, LONG_TREND_MIN, LONG_TREND_MAX, SHORT_TREND_MIN, SHORT_TREND_MAX)
     return None
 
 
@@ -450,7 +462,7 @@ def main():
                         if not klines or len(klines) < 70:
                             continue
 
-                        result = detect_signal(klines, config)
+                        result = detect_signal(klines, config, symbol)
                         if result is None:
                             continue
 
@@ -458,7 +470,7 @@ def main():
 
                         # ATR regime filter — skip ALL signals in trending/expanding-vol market
                         if atr_regime_skip:
-                            log.debug('SKIP %s — ATR regime vol expansion', symbol)
+                            log.info('NEAR-MISS %s %s vol=%.1fx trend=%.2f%% — ATR regime bloqueó', symbol, side, vol_ratio, pre_trend)
                             continue
 
                         # SHORT filter: Combo BTC1h + 3 velas verdes consecutivas
@@ -467,7 +479,7 @@ def main():
                             kl_c = [float(k[4]) for k in klines[:-1]]
                             consec3 = len(kl_c) >= 4 and kl_c[-1] > kl_c[-2] > kl_c[-3] > kl_c[-4]
                             if btc_1h_up or consec3:
-                                log.debug('SKIP SHORT %s — BTC_1h_up=%s consec3=%s', symbol, btc_1h_up, consec3)
+                                log.info('NEAR-MISS %s SHORT vol=%.1fx trend=%.2f%% — BTC_1h_up=%s consec3=%s', symbol, vol_ratio, pre_trend, btc_1h_up, consec3)
                                 continue
 
                         price = get_current_price(symbol)
