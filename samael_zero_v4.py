@@ -19,25 +19,30 @@ import sqlite3
 import math
 import requests
 from datetime import datetime, timezone, timedelta
+from dotenv import load_dotenv
+import decimal
 
 sys.path.insert(0, '/home/noc/samaelalpha')
 os.chdir('/home/noc/samaelalpha')
+load_dotenv()
 
 # ── Config ────────────────────────────────────────────────────────────────────
 CAPITAL = 500
 LONG_RISK = 0.35           # 35% per LONG trade (~$175)
 SHORT_RISK = 0.15          # 15% per SHORT trade (~$75)
-MAX_POSITIONS = 7
+MAX_POSITIONS = 10
 PAIRS = {
-    # v5 config — 7 pares activos (90d backtest: WR>=40%, PnL>0)
-    # Removidos: DOGEUSDT/XRPUSDT/BNBUSDT/CHIPUSDT/ADAUSDT/SUIUSDT/LTCUSDT/SOLUSDT (0 trades), TRUMPUSDT(17%WR -$0.89), TONUSDT(14%WR -$1.98)
+    # v9 config — top 10 por PnL/trade del universe backtest 365d (2026-05-18)
+    'LTCUSDT':    {'exit_min': 45, 'pre_trend_pct': 3.0, 'vol_mult': 10},
+    'XRPUSDT':    {'exit_min': 45, 'pre_trend_pct': 3.0, 'vol_mult': 10},
+    'ASTERUSDT':  {'exit_min': 45, 'pre_trend_pct': 3.0, 'vol_mult': 10},
+    'DOGEUSDT':   {'exit_min': 45, 'pre_trend_pct': 3.0, 'vol_mult': 10},
+    'TAOUSDT':    {'exit_min': 45, 'pre_trend_pct': 3.0, 'vol_mult': 10},
+    'CHZUSDT':    {'exit_min': 45, 'pre_trend_pct': 3.0, 'vol_mult': 10},
+    'BCHUSDT':    {'exit_min': 45, 'pre_trend_pct': 3.0, 'vol_mult': 10},
     'NEARUSDT':   {'exit_min': 45, 'pre_trend_pct': 3.0, 'vol_mult': 10},
-    'WLFIUSDT':   {'exit_min': 45, 'pre_trend_pct': 3.0, 'vol_mult': 10},
-    'DOGSUSDT':   {'exit_min': 45, 'pre_trend_pct': 3.0, 'vol_mult': 30},
-    'TSTUSDT':    {'exit_min': 45, 'pre_trend_pct': 3.0, 'vol_mult': 10},
-    'PENGUUSDT':  {'exit_min': 45, 'pre_trend_pct': 3.0, 'vol_mult': 10},
-    'NOTUSDT':    {'exit_min': 45, 'pre_trend_pct': 3.0, 'vol_mult': 10},
-    'OPUSDT':     {'exit_min': 45, 'pre_trend_pct': 3.0, 'vol_mult': 10},
+    'TRUMPUSDT':  {'exit_min': 45, 'pre_trend_pct': 3.0, 'vol_mult': 10},
+    'AVAXUSDT':   {'exit_min': 45, 'pre_trend_pct': 3.0, 'vol_mult': 10},
 }
 SL_PCT = 0.2                # live-validated: 0.1% liquidado por spread, 0.2% ok
 TP_PCT = 1.2                # live-validated: 43-48% WR con esto vs 9% WR con 2.0%
@@ -51,6 +56,12 @@ LONG_TREND_MAX  = 7.0           # LONG: cap en 7% (backtest: +206 PnL vs 6%)
 SHORT_TREND_MIN = 3.0           # SHORT: cualquier pump >= 3% revierte rápido
 SHORT_TREND_MAX = 7.0           # SHORT: cap en 7% (backtest: +206 PnL vs 6%)
 
+QTY_STEP = {                               # Binance USDM Futures lot size (stepSize)
+    'LTCUSDT': 0.001, 'XRPUSDT': 0.1,  'DOGEUSDT': 1,    'ASTERUSDT': 1,
+    'TAOUSDT': 0.001, 'CHZUSDT': 1,   'BCHUSDT': 0.001,
+    'NEARUSDT': 1,   'TRUMPUSDT': 0.01, 'AVAXUSDT': 1,
+}
+
 DB_PATH = '/home/noc/samaelalpha/data/samael_zero_v4.db'
 LOG_PATH = '/home/noc/samaelalpha/logs/samael_zero_v4.log'
 
@@ -61,6 +72,65 @@ logging.basicConfig(
     handlers=[logging.FileHandler(LOG_PATH)]  # no StreamHandler: nohup redirects stdout
 )
 log = logging.getLogger('zero_v4')
+
+
+# ── Exchange ─────────────────────────────────────────────────────────────────────────────
+def _init_exchange():
+    from binance.client import Client
+    import os
+    return Client(
+        api_key=os.getenv('BINANCE_FUTURES_API_KEY', ''),
+        api_secret=os.getenv('BINANCE_FUTURES_API_SECRET', ''),
+    )
+
+
+def _bybit_order(symbol, side, qty, close=False):
+    try:
+        step = QTY_STEP.get(symbol, 0.001)
+        decimals = abs(decimal.Decimal(str(step)).as_tuple().exponent)
+        qty_str = '{:.{}f}'.format(math.floor(qty / step) * step, decimals)
+        bn_side = 'BUY' if side in ('Buy', 'BUY') else 'SELL'
+        client = _init_exchange()
+        if not close:
+            try:
+                client.futures_change_leverage(symbol=symbol, leverage=1)
+            except Exception as lev_e:
+                log.warning('set_leverage %s (ignored): %s', symbol, lev_e)
+        client.futures_create_order(
+            symbol=symbol,
+            side=bn_side,
+            type='MARKET',
+            quantity=qty_str,
+            reduceOnly=close,
+        )
+        log.info('BINANCE ORDER %s %s qty=%s%s', bn_side, symbol, qty_str, ' [close]' if close else '')
+        return True
+    except Exception as e:
+        log.error('BINANCE ORDER FAILED %s %s: %s', side, symbol, e)
+        return False
+
+
+def _send_wp(msg):
+    try:
+        r = requests.post('http://localhost:3001/send',
+                      json={'chatId': '120363425022083138@g.us', 'message': msg},
+                      timeout=5)
+        if not r.json().get('ok'):
+            log.warning('WP send not ok: %s', r.text)
+    except Exception as e:
+        log.warning('WP send failed: %s', e)
+
+
+def get_real_balance():
+    try:
+        client = _init_exchange()
+        balances = client.futures_account_balance()
+        usdt = next((b for b in balances if b['asset'] == 'USDT'), None)
+        return float(usdt['availableBalance']) if usdt else None
+    except Exception as e:
+        log.warning('get_real_balance failed: %s', e)
+        return None
+
 
 # ── Database ──────────────────────────────────────────────────────────────────
 def init_db():
@@ -189,7 +259,7 @@ def detect_signal(klines, config, symbol='?'):
 
 # ── Position Management ───────────────────────────────────────────────────────
 def open_position(db, symbol, side, price, vol_ratio, pre_trend, config):
-    bal = get_balance(db)
+    bal = get_real_balance() or get_balance(db)
     # Dynamic sizing: spikes >= 30x → +50% size, >= 20x → +25% size (backtest v9: +7.56/7y)
     base_risk = LONG_RISK if side == "LONG" else SHORT_RISK
     if vol_ratio >= 30:
@@ -214,6 +284,26 @@ def open_position(db, symbol, side, price, vol_ratio, pre_trend, config):
          sl, tp, config['exit_min'], pre_trend, vol_ratio))
     db.commit()
 
+    ok = _bybit_order(symbol, 'Buy' if side == 'LONG' else 'Sell', qty)
+    if not ok:
+        row = db.execute(
+            'SELECT id FROM positions WHERE symbol=? AND status="open" ORDER BY id DESC LIMIT 1',
+            (symbol,)).fetchone()
+        if row:
+            db.execute('DELETE FROM positions WHERE id=?', (row[0],))
+            db.commit()
+        log.error('OPEN ABORTED %s — exchange failed, DB rolled back', symbol)
+        return
+
+    direction = 'BUY' if side == 'LONG' else 'SELL'
+    _send_wp(
+        'SAMAEL ZERO v4 - APERTURA\n'
+        + direction + ' ' + symbol + '\n'
+        + 'Precio: %.6f | Vol: %.1fx | Trend: %+.2f%%\n' % (price, vol_ratio, pre_trend)
+        + 'SL: %.6f | TP: %.6f\n' % (sl, tp)
+        + 'Bal: $%.2f' % get_balance(db)
+    )
+
     log.info('OPEN %s %s @ %.2f | SL=%.2f TP=%.2f | vol=%.1fx trend=%+.2f%% | hold<=%dm',
              side, symbol, price, sl, tp, vol_ratio, pre_trend, config['exit_min'])
 
@@ -235,6 +325,12 @@ def close_position(db, pos, exit_price, reason):
     entry_dt = datetime.fromisoformat(pos['entry_time'])
     hold_min = (datetime.now(timezone.utc) - entry_dt).total_seconds() / 60
 
+    # Exchange first — if it fails, position stays open in DB for retry next cycle
+    ok = _bybit_order(pos['symbol'], 'Sell' if pos['side'] == 'LONG' else 'Buy', qty, close=True)
+    if not ok:
+        log.error('CLOSE FAILED on exchange %s — keeping open in DB for retry', pos['symbol'])
+        return 0.0
+
     db.execute('UPDATE positions SET status="closed" WHERE id=?', (pos['id'],))
     db.execute(
         'INSERT INTO trades (symbol,side,entry_price,exit_price,quantity,pnl,pnl_pct,pre_trend_pct,vol_ratio,entry_time,exit_time,exit_reason,hold_minutes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
@@ -246,6 +342,18 @@ def close_position(db, pos, exit_price, reason):
     db.execute('INSERT INTO equity (timestamp, balance) VALUES (?, ?)',
                (datetime.now(timezone.utc).isoformat(), bal))
     db.commit()
+
+
+    resultado = 'GANANCIA' if pnl > 0 else 'PERDIDA'
+    signo = '+' if pnl > 0 else ''
+    _send_wp(
+        'SAMAEL ZERO v4 - CIERRE (' + resultado + ')\n'
+        + pos['side'] + ' ' + pos['symbol'] + '\n'
+        + '%.6f -> %.6f\n' % (entry, exit_price)
+        + 'PnL: %s%.2f USD (%s%.2f%%)\n' % (signo, pnl, signo, pnl_pct)
+        + 'Razon: %s | Hold: %.0fm\n' % (reason, hold_min)
+        + 'Bal: $%.2f' % bal
+    )
 
     icon = '+' if pnl > 0 else ''
     log.info('CLOSE %s %s %.2f->%.2f | %s%.2f (%s%.2f%%) | %s | %.0fm | Bal=$%.2f',
@@ -339,9 +447,12 @@ def report(db):
     log.info('=' * 60)
     log.info('ZERO v4 REPORT: %d trades | WR=%.0f%% | Sharpe=%.2f | DD=%.1f%%',
              n, wr * 100, sharpe, max_dd)
-    log.info('Balance: $%.2f | PnL: $%.2f (%.2f%%)', bal, total_pnl, total_pnl / CAPITAL * 100)
+    _first = db.execute('SELECT balance FROM equity ORDER BY id ASC LIMIT 1').fetchone()
+    initial_bal = _first[0] if _first else CAPITAL
+    log.info('Balance: $%.2f | PnL: $%.2f (%.2f%%)', bal, total_pnl, total_pnl / initial_bal * 100)
     log.info('Exits: SL=%d TP=%d TIME=%d', sl_count, tp_count, time_count)
-    log.info('Pairs: %d | SL=%.1f%% TP=%.1f%% L-Risk=%.0f%% S-Risk=%.0f%% vol=10x hold<=15m', len(PAIRS), SL_PCT, TP_PCT, LONG_RISK*100, SHORT_RISK*100)
+    max_hold = max(c['exit_min'] for c in PAIRS.values())
+    log.info('Pairs: %d | SL=%.1f%% TP=%.1f%% L-Risk=%.0f%% S-Risk=%.0f%% vol=10x hold<=%dm', len(PAIRS), SL_PCT, TP_PCT, LONG_RISK*100, SHORT_RISK*100, max_hold)
     log.info('=' * 60)
 
 
